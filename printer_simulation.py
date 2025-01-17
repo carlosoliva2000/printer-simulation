@@ -342,11 +342,7 @@ def process_output(file: str, output: Optional[str] = None) -> str:
     return output_file
 
 
-
-def print_image_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
-    subprocess.Popen(["eog", file])
-    logger.debug(f"Priting image {file}")
-
+def start_print_process_visually(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
     # Start the print dialog
     logger.debug(f"Starting the print dialog for {file}")
     pyautogui.sleep(2)
@@ -392,12 +388,33 @@ def print_image_linux(file: str, output: Optional[str], delay: Union[float, Tupl
     with pyautogui.hold('shift'): # Go to the "Print" button
         pyautogui.press('tab', presses=3, interval=0.25)
     pyautogui.press('enter', presses=2, interval=0.5)  # Two presses in case of confirmation dialog of an existing file
+    pyautogui.hotkey('ctrl', 'z')  # Needed to undo in case of printing a text file
     pyautogui.sleep(1)
 
     # Check the output (is it a directory or a filename?)
     output_file = process_output(file, output)
 
     return output_file
+
+
+
+def print_image_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
+    subprocess.Popen(["eog", file])
+    logger.debug(f"Priting image {file}")
+
+    output_file = start_print_process_visually(file, output, delay)
+
+    return output_file
+
+
+def print_text_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
+    subprocess.Popen(["gedit", file])
+    logger.debug(f"Priting text file {file}")
+
+    output_file = start_print_process_visually(file, output, delay)
+
+    return output_file
+
 
 
 def open_pdf_linux(file: str, delay: Union[float, Tuple[float, float]]):
@@ -427,6 +444,10 @@ def print_visually_linux(
         if file.endswith('.png') or file.endswith('.jpg') or file.endswith('.jpeg'):
             logger.debug(f"Printing image {file}")
             output_file = print_image_linux(file, output, 0.125)
+        # Check if the file a text file
+        elif file.endswith('.txt') or file.endswith('.md') or file.endswith('.json'):
+            logger.debug(f"Printing text file {file}")
+            output_file = print_text_linux(file, output, 0.125)
         else:
             output_file = ""
 
