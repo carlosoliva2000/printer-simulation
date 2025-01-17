@@ -342,7 +342,12 @@ def process_output(file: str, output: Optional[str] = None) -> str:
     return output_file
 
 
-def start_print_process_visually(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
+def start_print_process_visually(
+        file: str, 
+        output: Optional[str], 
+        delay: Union[float, Tuple[float, float]], 
+        is_libreoffice: bool = False
+    ) -> str:
     # Start the print dialog
     logger.debug(f"Starting the print dialog for {file}")
     pyautogui.sleep(2)
@@ -352,20 +357,31 @@ def start_print_process_visually(file: str, output: Optional[str], delay: Union[
 
     # Go to the printers list
     logger.debug("Selecting the printer")
-    pyautogui.press('tab')
-    pyautogui.sleep(1)
+    if is_libreoffice:
+        with pyautogui.hold('shift'):
+            pyautogui.press('tab', interval=0.5, presses=5)
+        
+        # Change the printer to print to a file
+        pyautogui.sleep(1)
+        pyautogui.press('space')
+        pyautogui.sleep(1)
+        pyautogui.write('imprimir', interval=0.1)
+        pyautogui.press('enter', interval=0.5, presses=2)
+    else:
+        pyautogui.press('tab')
+        pyautogui.sleep(1)
 
-    # Write "imprimir" to ensure the right printer is selected
-    pyautogui.write('imprimir', interval=0.1)
+        # Write "imprimir" to ensure the right printer is selected
+        pyautogui.write('imprimir', interval=0.1)
 
-    # Now, go to the filename field
-    logger.debug("Selecting the filename")
-    pyautogui.press('tab', presses=2, interval=0.5)
+        # Now, go to the filename field
+        logger.debug("Selecting the filename")
+        pyautogui.press('tab', presses=2, interval=0.5)
 
-    # Press Enter to write the filename
-    pyautogui.press('enter')
-    pyautogui.sleep(1)
-    
+        # Press Enter to write the filename
+        pyautogui.press('enter')
+        pyautogui.sleep(1)
+        
     # Write the filename
     parts = split_path_regex(f"{file}.pdf")
     logger.debug(f"Split input path: {parts}")
@@ -385,11 +401,20 @@ def start_print_process_visually(file: str, output: Optional[str], delay: Union[
     pyautogui.press('enter')  # Select the filename
     pyautogui.sleep(1)
     logger.debug("Pressing the Print button")
-    with pyautogui.hold('shift'): # Go to the "Print" button
-        pyautogui.press('tab', presses=3, interval=0.25)
-    pyautogui.press('enter', presses=2, interval=0.5)  # Two presses in case of confirmation dialog of an existing file
-    pyautogui.hotkey('ctrl', 'z')  # Needed to undo in case of printing a text file
-    pyautogui.sleep(1)
+
+    if is_libreoffice:
+        # These are needed in case of confirmation dialog on an existing file
+        pyautogui.press('tab')
+        pyautogui.press('enter')
+        pyautogui.hotkey('ctrl', 'z')  # Needed to undo in case of printing a text file
+        pyautogui.hotkey('ctrl', 'z')
+        pyautogui.sleep(1)
+    if not is_libreoffice:
+        with pyautogui.hold('shift'): # Go to the "Print" button
+            pyautogui.press('tab', presses=3, interval=0.25)
+        pyautogui.press('enter', presses=2, interval=0.5)  # Two presses in case of confirmation dialog of an existing file
+        pyautogui.hotkey('ctrl', 'z')  # Needed to undo in case of printing a text file
+        pyautogui.sleep(1)
 
     # Check the output (is it a directory or a filename?)
     output_file = process_output(file, output)
@@ -412,6 +437,14 @@ def print_text_linux(file: str, output: Optional[str], delay: Union[float, Tuple
     logger.debug(f"Priting text file {file}")
 
     output_file = start_print_process_visually(file, output, delay)
+
+    return output_file
+
+def print_libreoffice_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
+    subprocess.Popen(["libreoffice", file])
+    logger.debug(f"Priting LibreOffice file {file}")
+
+    output_file = start_print_process_visually(file, output, delay, is_libreoffice=True)
 
     return output_file
 
@@ -448,6 +481,10 @@ def print_visually_linux(
         elif file.endswith('.txt') or file.endswith('.md') or file.endswith('.json'):
             logger.debug(f"Printing text file {file}")
             output_file = print_text_linux(file, output, 0.125)
+        # Check if the file a LibreOffice file
+        elif file.endswith('.odt') or file.endswith('.ods') or file.endswith('.odp'):
+            logger.debug(f"Printing LibreOffice file {file}")
+            output_file = print_libreoffice_linux(file, output, 0.125)
         else:
             output_file = ""
 
