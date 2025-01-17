@@ -6,6 +6,7 @@ import subprocess
 import string
 import logging
 import argparse
+import shutil
 
 import pyperclip
 import re
@@ -316,17 +317,45 @@ def sleep_action(delay: Union[float, Tuple[float, float]], extra_delay: float = 
     pyautogui.sleep(delay + extra_delay)
 
 
+def process_output(file: str, output: Optional[str] = None) -> str:
+    if output:
+        output = os.path.expanduser(output)
+        if os.path.isdir(output):
+            logger.debug("Output is a directory, using the same filename as the input file")
+            output_file = os.path.join(output, os.path.basename(file) + '.pdf')
+        else:
+            logger.debug("Output is a filename")
+            # If the output is a plain filename, output_file should be in the same directory as the input file
+            # If not, it will be the output filename
+            if os.path.isdir(os.path.dirname(output)):
+                output_file = output
+            else:
+                output_file = os.path.join(os.path.dirname(file), output)
+        
+        # Move the file to the output directory
+        logger.debug(f"Moving the file to {output_file}")
+        shutil.move(f"{file}.pdf", output_file)
+    else:
+        logger.debug("No output directory provided, using the same directory as the input file")
+        output_file = file + '.pdf'
+    
+    return output_file
+
+
 
 def print_image_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
     subprocess.Popen(["eog", file])
+    logger.debug(f"Priting image {file}")
 
     # Start the print dialog
+    logger.debug(f"Starting the print dialog for {file}")
     pyautogui.sleep(2)
     with pyautogui.hold('ctrl'):
         pyautogui.press('p')
     pyautogui.sleep(3)
 
     # Go to the printers list
+    logger.debug("Selecting the printer")
     pyautogui.press('tab')
     pyautogui.sleep(1)
 
@@ -334,25 +363,16 @@ def print_image_linux(file: str, output: Optional[str], delay: Union[float, Tupl
     pyautogui.write('imprimir', interval=0.1)
 
     # Now, go to the filename field
+    logger.debug("Selecting the filename")
     pyautogui.press('tab', presses=2, interval=0.5)
 
     # Press Enter to write the filename
     pyautogui.press('enter')
     pyautogui.sleep(1)
-
-
-    # Check the output (is it a directory or a filename?)
-    if output:
-        if os.path.isdir(output):
-            output_file = os.path.join(output, os.path.basename(file) + '.pdf')
-        else:
-            output_file = output
-    else:
-        logger.debug("No output directory provided, using the same directory as the input file")
-        output_file = file + '.pdf'
+    
     # Write the filename
-    parts = split_path_regex(output_file)
-    logger.debug(f"Split path: {parts}")
+    parts = split_path_regex(f"{file}.pdf")
+    logger.debug(f"Split input path: {parts}")
 
     pyautogui.hotkey('ctrl', 'a')
     for part in parts:
@@ -366,20 +386,25 @@ def print_image_linux(file: str, output: Optional[str], delay: Union[float, Tupl
             pyautogui.write(part, delay)
 
     pyautogui.sleep(1)
-    pyautogui.press('enter')
+    pyautogui.press('enter')  # Select the filename
     pyautogui.sleep(1)
-    with pyautogui.hold('shift'):
+    logger.debug("Pressing the Print button")
+    with pyautogui.hold('shift'): # Go to the "Print" button
         pyautogui.press('tab', presses=3, interval=0.25)
-    pyautogui.press('enter')
+    pyautogui.press('enter', presses=2, interval=0.5)  # Two presses in case of confirmation dialog of an existing file
     pyautogui.sleep(1)
+
+    # Check the output (is it a directory or a filename?)
+    output_file = process_output(file, output)
 
     return output_file
 
 
 def open_pdf_linux(file: str, delay: Union[float, Tuple[float, float]]):
+    logger.debug(f"Opening PDF {file}")
     subprocess.Popen(["evince", file])
-    logger.debug(f"Opening {file}")
-    sleep_action(delay)
+    logger.debug("Simulating reading the PDF")
+    sleep_action(delay)  # TODO: add actions such as zooming, scrolling, etc.
 
     # Ensure the focus is on the evince window
     os.system("wmctrl -xa evince.Evince")
@@ -400,6 +425,7 @@ def print_visually_linux(
     for file in files:
         # Check if the file is an image
         if file.endswith('.png') or file.endswith('.jpg') or file.endswith('.jpeg'):
+            logger.debug(f"Printing image {file}")
             output_file = print_image_linux(file, output, 0.125)
         else:
             output_file = ""
@@ -451,12 +477,14 @@ def main():
 
     # Preprocess options
     visible = args.visible or not args.invisible
-
+    logger.debug(f"Printing will be {'visible' if visible else 'invisible'}")
 
     # Check the OS
     if get_system() == 'Windows':
+        logger.debug("Running in Windows")
         print_in_windows(visible, args.files, args.min_delay, args.max_delay, args.delay, args.output)
     else:
+        logger.debug("Running in Linux")
         print_in_linux(visible, args.files, args.min_delay, args.max_delay, args.delay, args.output)
 
 
