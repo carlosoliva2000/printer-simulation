@@ -23,6 +23,17 @@ def get_system():
         return 'Windows'
     else:
         return 'Linux'
+    
+
+def wait_for_program(program: str):
+    logger.debug(f"Waiting for {program} to load")
+    while True:
+        result = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True)
+        if program in result.stdout:
+            logger.debug(f"{program} is loaded")
+            break
+        pyautogui.sleep(1)  # Wait for 1 second before checking again
+    pyautogui.sleep(2)  # Fail-safe sleep to ensure the program is fully loaded
 
 
 def split_path_regex(path: str) -> List[str]:
@@ -317,7 +328,7 @@ def sleep_action(delay: Union[float, Tuple[float, float]], extra_delay: float = 
     pyautogui.sleep(delay + extra_delay)
 
 
-def process_output(file: str, output: Optional[str] = None) -> str:
+def process_output(file: str, output: Optional[str] = None, is_libreoffice: bool = False) -> str:
     if output:
         output = os.path.expanduser(output)
         if os.path.isdir(output):
@@ -332,9 +343,10 @@ def process_output(file: str, output: Optional[str] = None) -> str:
             else:
                 output_file = os.path.join(os.path.dirname(file), output)
         
-        # Move the file to the output directory
-        logger.debug(f"Moving the file to {output_file}")
-        shutil.move(f"{file}.pdf", output_file)
+        if not is_libreoffice:
+            # Move the file to the output directory
+            logger.debug(f"Moving the file to {output_file}")
+            shutil.move(f"{file}.pdf", output_file)
     else:
         logger.debug("No output directory provided, using the same directory as the input file")
         output_file = file + '.pdf'
@@ -383,7 +395,13 @@ def start_print_process_visually(
         pyautogui.sleep(1)
         
     # Write the filename
-    parts = split_path_regex(f"{file}.pdf")
+    # Check the output (is it a directory or a filename?)
+    output_file = process_output(file, output, is_libreoffice)
+    if is_libreoffice:
+        # output_file = process_output(file, output, is_libreoffice)
+        parts = split_path_regex(output_file)
+    else:
+        parts = split_path_regex(f"{file}.pdf")
     logger.debug(f"Split input path: {parts}")
 
     pyautogui.hotkey('ctrl', 'a')
@@ -417,7 +435,7 @@ def start_print_process_visually(
         pyautogui.sleep(1)
 
     # Check the output (is it a directory or a filename?)
-    output_file = process_output(file, output)
+    # output_file = process_output(file, output)
 
     return output_file
 
@@ -426,6 +444,8 @@ def start_print_process_visually(
 def print_image_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
     subprocess.Popen(["eog", file])
     logger.debug(f"Priting image {file}")
+    # In case of eog, the program name is the name of the file (just the last part)
+    wait_for_program(os.path.basename(file))
 
     output_file = start_print_process_visually(file, output, delay)
 
@@ -435,6 +455,7 @@ def print_image_linux(file: str, output: Optional[str], delay: Union[float, Tupl
 def print_text_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
     subprocess.Popen(["gedit", file])
     logger.debug(f"Priting text file {file}")
+    wait_for_program("gedit")
 
     output_file = start_print_process_visually(file, output, delay)
 
@@ -443,6 +464,7 @@ def print_text_linux(file: str, output: Optional[str], delay: Union[float, Tuple
 def print_libreoffice_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
     subprocess.Popen(["libreoffice", file])
     logger.debug(f"Priting LibreOffice file {file}")
+    wait_for_program("LibreOffice")
 
     output_file = start_print_process_visually(file, output, delay, is_libreoffice=True)
 
@@ -536,6 +558,11 @@ def main():
     # Preprocess options
     visible = args.visible or not args.invisible
     logger.debug(f"Printing will be {'visible' if visible else 'invisible'}")
+
+    # Set the current directory as the input (without the last part)
+    input_dir = os.path.dirname(args.files[0])
+    os.chdir(input_dir)
+    logger.debug(f"Woring directory: {input_dir}")
 
     # Check the OS
     if get_system() == 'Windows':
