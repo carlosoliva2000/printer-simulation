@@ -1,21 +1,48 @@
-import json
 import os
 import random
-import pyautogui
 import subprocess
-import string
+import re
 import logging
 import argparse
 import shutil
 
-import pyperclip
-import re
-
 from typing import List, Optional, Tuple, Union
+from logging.handlers import RotatingFileHandler
+
+path = os.path.join(os.path.expanduser('~'), ".config", "printer-simulation")
+os.makedirs(path, exist_ok=True)
+
+try:
+    import pyautogui
+    import pyperclip
+except Exception as e:
+    import traceback
+    import datetime
+
+    error_file = os.path.join(path, "error_printer-simulation.log")
+    with open(error_file, "a") as file:
+        file.write("Date and time: \n")
+        file.write(str(datetime.datetime.now()))
+        file.write("\n\n")
+        file.write("Error: \n")
+        file.write(str(e))
+        file.write("\n\n")
+        file.write("Traceback: \n")
+        file.write(str(traceback.format_exc()))
+        file.write("\n\n")
+        file.write("Environment variables: \n")
+        file.write(str(os.environ))
+        file.write("\n\n")
 
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s')
+format_str = '%(asctime)s - %(levelname)s - %(message)s'
+formatter = logging.Formatter(format_str)
 logger = logging.getLogger(__name__)
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+console_handler.setLevel(logging.WARNING)
+logger.addHandler(console_handler)
 
 
 def get_system():
@@ -285,8 +312,21 @@ def main():
     args = parser.parse_args()
 
 
+    file_handler = RotatingFileHandler(
+        os.path.join(path, 'printer-simulation.log'),
+        maxBytes=1024*1024,
+        backupCount=3
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.INFO)
+    logger.addHandler(file_handler)
+    
     if args.debug:
         logger.setLevel(logging.DEBUG)
+        console_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(logging.DEBUG)
+    else:
+        logger.setLevel(logging.INFO)
 
     # Preprocess options
     visible = args.visible or not args.invisible
