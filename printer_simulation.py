@@ -234,15 +234,31 @@ def print_libreoffice_linux(file: str, output: Optional[str], delay: Union[float
 
 def open_pdf_linux(file: str, delay: Union[float, Tuple[float, float]]):
     logger.debug(f"Opening PDF {file}")
-    subprocess.Popen(["evince", file])
+    # subprocess.Popen(["evince", file])  # FIXME: This is not working
+    subprocess.Popen(["firefox", "--new-window", file])
+    window_name = f"{file} — Mozilla Firefox".split("/")[-1]  # Get the last part of the path
+    wait_for_program(window_name)
     logger.debug("Simulating reading the PDF")
     sleep_action(delay)  # TODO: add actions such as zooming, scrolling, etc.
 
     # Ensure the focus is on the evince window
-    os.system("wmctrl -xa evince.Evince")
+    # os.system("wmctrl -xa evince.Evince")
+
+    # Execute wmctrl -l and get the window list
+    res = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True)
+    lines = res.stdout.splitlines()
+
+    # Busca la ventana que contenga el nombre especificado
+    for line in lines:
+        if window_name in line:
+            wid = line.split()[0]  # Get the window ID
+            # Cambia el foco a la ventana
+            subprocess.run(["wmctrl", "-ia", wid])
+            logger.debug(f"Changing focus to {window_name}")
+            break
     pyautogui.sleep(1)
 
-    # Close the evince window
+    # Close the evince/firefox window
     pyautogui.hotkey('alt', 'f4')
     pyautogui.sleep(1)
 
@@ -271,6 +287,7 @@ def print_visually_linux(
             output_file = ""
 
         open_pdf_linux(output_file, (min_delay, max_delay))
+        os.system("wmctrl -xa gedit.Gedit")
         pyautogui.sleep(1)
         pyautogui.hotkey('alt', 'f4')
         pyautogui.sleep(1)
@@ -320,7 +337,7 @@ def main():
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.INFO)
     logger.addHandler(file_handler)
-    
+
     if args.debug:
         logger.setLevel(logging.DEBUG)
         console_handler.setLevel(logging.DEBUG)
