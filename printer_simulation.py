@@ -5,45 +5,185 @@ import re
 import logging
 import argparse
 import shutil
+import importlib.util
 
+from time import sleep
 from typing import List, Optional, Tuple, Union
 from logging.handlers import RotatingFileHandler
 
-path = os.path.join(os.path.expanduser('~'), ".config", "printer-simulation")
-os.makedirs(path, exist_ok=True)
 
-try:
-    import pyautogui
-    import pyperclip
-except Exception as e:
-    import traceback
-    import datetime
+# Logging setup
 
-    error_file = os.path.join(path, "error_printer-simulation.log")
-    with open(error_file, "a") as file:
-        file.write("Date and time: \n")
-        file.write(str(datetime.datetime.now()))
-        file.write("\n\n")
-        file.write("Error: \n")
-        file.write(str(e))
-        file.write("\n\n")
-        file.write("Traceback: \n")
-        file.write(str(traceback.format_exc()))
-        file.write("\n\n")
-        file.write("Environment variables: \n")
-        file.write(str(os.environ))
-        file.write("\n\n")
+LOG_PATH = os.path.join(os.path.expanduser('~'), ".config", "printer-simulation")
+os.makedirs(LOG_PATH, exist_ok=True)
+
+format_str = "%(asctime)s [PID %(process)d] - %(funcName)s - %(levelname)s - %(message)s"
+class LevelBasedFormatter(logging.Formatter):
+    """Custom formatter to change format based on log level."""
+    def format(self, record):
+        if record.levelno == logging.INFO:
+            fmt = "%(message)s"
+        else:
+            fmt = "%(levelname)s - %(message)s"
+        formatter = logging.Formatter(fmt)
+        return formatter.format(record)
 
 
-format_str = '%(asctime)s - %(levelname)s - %(message)s'
 formatter = logging.Formatter(format_str)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 console_handler = logging.StreamHandler()
-console_handler.setFormatter(formatter)
-console_handler.setLevel(logging.WARNING)
 logger.addHandler(console_handler)
 
+file_handler = RotatingFileHandler(
+    os.path.join(os.path.expanduser(LOG_PATH), 'printer-simulation.log'),
+    maxBytes=1024*1024, 
+    backupCount=3
+)
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+
+# Dependencies and DISPLAY check
+
+def _check_binary(name: str) -> bool:
+    """Check if a binary is installed."""
+    res = subprocess.run(['which', name], capture_output=True, text=True)
+    return res.returncode == 0
+
+
+def _check_python_dependency(name: str) -> bool:
+    """Check if a Python dependency is installed."""
+    return importlib.util.find_spec(name) is not None
+
+
+def _check_and_import_dependencies():
+    """Check if all dependencies are installed and import them."""
+    logger.debug("Checking dependencies...")
+    try:
+        # Check if DISPLAY variable is set
+        logger.debug("Checking DISPLAY environment variable...")
+        if 'DISPLAY' not in os.environ:
+            raise EnvironmentError("DISPLAY environment variable is not set. Please run this script in a graphical environment.")
+
+        # Check if dependencies are installed
+        logger.debug("Checking required binaries and Python packages...")
+        binaries = ['firefox', 'eog', 'libreoffice', 'gedit', 'wmctrl', 'input-simulation']
+        python_modules = ['filelock']
+
+        bins_not_installed = []
+        python_not_installed = []
+        for bin in binaries:
+            if not _check_binary(bin):
+                bins_not_installed.append(bin)
+        for py_mod in python_modules:
+            if not _check_python_dependency(py_mod):
+                python_not_installed.append(py_mod)
+        
+        if bins_not_installed or python_not_installed:
+            error_msg = f"""
+Some dependencies are not installed.
+Binaries not installed: {bins_not_installed}.
+Python packages not installed: {python_not_installed}.
+Please install them and try again."""
+            raise ModuleNotFoundError(error_msg)
+            # raise ModuleNotFoundError(f"Dependencies not installed: {', '.join(not_installed)}. Please install them and try again.")
+
+        # Everything is fine, import the dependencies
+        logger.debug("All dependencies are installed.")
+
+        global FileLock
+        from filelock import FileLock
+
+        # for mod in python_modules:
+        #     globals()[mod] = importlib.import_module(mod)
+
+        logger.debug("All dependencies imported.")
+    except Exception as e:
+        # Log the error to a separate error log file with traceback and environment variables
+        import traceback
+        import datetime
+
+        error_file = os.path.join(LOG_PATH, "error_printer-simulation.log")
+        logger.error(f"Dependency check failed: {e}")
+        logger.error(f"Check the error log {error_file} for more details.")
+
+        with open(error_file, "w") as file:
+            file.write("Date and time: \n")
+            file.write(str(datetime.datetime.now()))
+            file.write("\n\n")
+            file.write("Error: \n")
+            file.write(str(e))
+            file.write("\n\n")
+            file.write("Traceback: \n")
+            file.write(str(traceback.format_exc()))
+            file.write("\n\n")
+            file.write("Environment variables: \n")
+            file.write(str(os.environ))
+            file.write("\n\n")
+        exit(1)
+
+
+# Lock setup
+
+def _setup_locks():
+    global LOCK, LOCK_INPUT
+    LOCK = FileLock(os.path.join("/", "opt", "scripts", ".printer.lock"))
+    LOCK_INPUT = FileLock(os.path.join("/", "opt", "scripts", ".input.lock"))
+
+
+# Input simulation functions
+
+def _set_env():
+    """Set the INPUT_LOCK_HELD environment variable for subprocesses."""
+    env = os.environ.copy()
+    env['INPUT_LOCK_HELD'] = '1'  # Hint to input-simulation that the lock is already held
+    return env
+
+
+def input_simulation(sequence: List[str], verb: str, args: Optional[dict] = None, debug: bool = False):
+    """Simulate a sequence of inputs using input-simulation."""
+    env = _set_env()
+
+    # Convert args dict to a list of command line arguments
+    args_l = [f"{key}={value}" if value else f"{key}" for key, value in args.items()] if args is not None else []
+    if debug:
+        args_l.append('--debug')
+    sequence_string = ' '.join(sequence)
+
+    if args_l:
+        command = ['input-simulation', verb] + args_l + [f"{sequence_string}"]
+    else:
+        command = ['input-simulation', verb, f"{sequence_string}"]
+    logger.debug(f"Invoking input-simulation command with verb '{verb}', args: {args_l} and sequence (truncated at 50): {sequence_string[:50]}...")
+    subprocess.run(command, env=env)
+    logger.debug("Returned from input-simulation.")
+
+
+def input_key(key: str, presses: int = 1, args: Optional[dict] = None, debug: bool = False):
+    """Simulate a key press using input-simulation."""
+    sequence = [f'K,{key},{presses}']
+    input_simulation(sequence, 'keyboard', args, debug)
+
+
+def input_type(text: str, args: Optional[dict] = None, debug: bool = False):
+    """Simulate typing text using input-simulation."""
+    sequence = [f'T,"{text}"']
+    input_simulation(sequence, 'keyboard', args, debug)
+
+
+def input_keyboard_sequence(sequence: List[str], args: Optional[dict] = None, debug: bool = False):
+    """Simulate a sequence of keyboard actions using input-simulation."""
+    input_simulation(sequence, 'keyboard', args, debug)
+
+
+def input_sequence(sequence: List[str], args: Optional[dict] = None, debug: bool = False):
+    """Simulate a sequence of input actions using input-simulation."""
+    input_simulation(sequence, 'input', args, debug)
+
+
+# Auxiliary functions
 
 def get_system():
     if os.name == 'nt':
@@ -59,25 +199,8 @@ def wait_for_program(program: str):
         if program in result.stdout:
             logger.debug(f"{program} is loaded")
             break
-        pyautogui.sleep(1)  # Wait for 1 second before checking again
-    pyautogui.sleep(2)  # Fail-safe sleep to ensure the program is fully loaded
-
-
-def split_path_regex(path: str) -> List[str]:
-    # Regex to split path elements such as "/" or "~"
-    pattern = r'(~/|/|[^/]+)'
-    return re.findall(pattern, path)
-
-
-def print_in_windows(
-        visible: bool, 
-        files: List[str],
-        min_delay: float,
-        max_delay: float,
-        delay: float,
-        output: Optional[str]
-    ):
-    pass
+        sleep(1)  # Wait for 1 second before checking again
+    sleep(2)  # Fail-safe sleep to ensure the program is fully loaded
 
 
 def sleep_action(delay: Union[float, Tuple[float, float]], extra_delay: float = 0.0):
@@ -85,7 +208,7 @@ def sleep_action(delay: Union[float, Tuple[float, float]], extra_delay: float = 
         min_delay, max_delay = delay
         delay = random.uniform(min_delay, max_delay)
     logger.debug(f"Sleeping for {delay} seconds (extra {extra_delay} seconds)")
-    pyautogui.sleep(delay + extra_delay)
+    sleep(delay + extra_delay)
 
 
 def process_output(file: str, output: Optional[str] = None, is_libreoffice: bool = False) -> str:
@@ -114,88 +237,89 @@ def process_output(file: str, output: Optional[str] = None, is_libreoffice: bool
     return output_file
 
 
+# Windows printing functions (not implemented yet)
+
+def print_in_windows(
+        visible: bool, 
+        files: List[str],
+        min_delay: float,
+        max_delay: float,
+        delay: float,
+        output: Optional[str]
+    ):
+    pass
+
+
+# Linux printing functions
+
+
 def start_print_process_visually(
         file: str, 
         output: Optional[str], 
         delay: Union[float, Tuple[float, float]], 
-        is_libreoffice: bool = False
+        is_libreoffice: bool = False,
+        debug: bool = False
     ) -> str:
     # Start the print dialog
     logger.debug(f"Starting the print dialog for {file}")
-    pyautogui.sleep(2)
-    with pyautogui.hold('ctrl'):
-        pyautogui.press('p')
-    pyautogui.sleep(3)
+    sleep(2)
+    input_key('Ctrl+P', debug=debug)
+    sleep(3)
 
     # Go to the printers list
     logger.debug("Selecting the printer")
+    args = {
+        "--press-interval": 0.5,
+        "--typing-interval": 0.1,
+        "--sleep": 1.0
+    }
     if is_libreoffice:
-        with pyautogui.hold('shift'):
-            pyautogui.press('tab', interval=0.5, presses=5)
-        
-        # Change the printer to print to a file
-        pyautogui.sleep(1)
-        pyautogui.press('space')
-        pyautogui.sleep(1)
-        pyautogui.write('imprimir', interval=0.1)
-        pyautogui.press('enter', interval=0.5, presses=2)
+        sequence = [
+            'K,Shift+Tab,5',  # Go to the print option
+            'K,Space',  # Select the print option
+            'T,"imprimir"',  # Change the printer to print to a file
+            'S,0.0',
+            'K,Enter,2'  # Select the printer
+        ]
     else:
-        pyautogui.press('tab')
-        pyautogui.sleep(1)
-
-        # Write "imprimir" to ensure the right printer is selected
-        pyautogui.write('imprimir', interval=0.1)
-
-        # Now, go to the filename field
-        logger.debug("Selecting the filename")
-        pyautogui.press('tab', presses=2, interval=0.5)
-
-        # Press Enter to write the filename
-        pyautogui.press('enter')
-        pyautogui.sleep(1)
+        sequence = [
+            'K,Tab,1',  # Go to the printer text field
+            'T,"imprimir"',  # Write "imprimir" to ensure the right printer is selected
+            'S,0.0',
+            'K,Tab,2',  # Go to the filename field
+            'K,Enter'  # Press Enter to write the filename
+        ]
+    input_keyboard_sequence(sequence, args, debug)
         
     # Write the filename
     # Check the output (is it a directory or a filename?)
     output_file = process_output(file, output, is_libreoffice)
-    if is_libreoffice:
-        # output_file = process_output(file, output, is_libreoffice)
-        parts = split_path_regex(output_file)
-    else:
-        parts = split_path_regex(f"{file}.pdf")
-    logger.debug(f"Split input path: {parts}")
 
-    pyautogui.hotkey('ctrl', 'a')
-    for part in parts:
-        # Fix to writing special characters
-        if '/' in part or '~' in part:
-            pyperclip.copy(part)
-            pyautogui.sleep(0.05)
-            pyautogui.hotkey('ctrl', 'v')
-            pyautogui.sleep(0.05)
-        else:
-            pyautogui.write(part, delay)
-
-    pyautogui.sleep(1)
-    pyautogui.press('enter')  # Select the filename
-    pyautogui.sleep(1)
-    logger.debug("Pressing the Print button")
+    sequence = [
+        'K,Ctrl+A',  # Select all text
+        'S,0.0',
+        f'T,"{output_file}"',  # Type the filename
+        'S,1.0',
+        'K,Enter',  # Select the filename
+        'S,1.0',
+    ]
+    input_keyboard_sequence(sequence, args, debug)
 
     if is_libreoffice:
         # These are needed in case of confirmation dialog on an existing file
-        pyautogui.press('tab')
-        pyautogui.press('enter')
-        pyautogui.hotkey('ctrl', 'z')  # Needed to undo in case of printing a text file
-        pyautogui.hotkey('ctrl', 'z')
-        pyautogui.sleep(1)
+        sequence = [
+            'K,Tab',
+            'K,Enter',
+            'K,Ctrl+Z,2'  # Needed to undo in case of printing a text file
+        ]
     if not is_libreoffice:
-        with pyautogui.hold('shift'): # Go to the "Print" button
-            pyautogui.press('tab', presses=3, interval=0.25)
-        pyautogui.press('enter', presses=2, interval=0.5)  # Two presses in case of confirmation dialog of an existing file
-        pyautogui.hotkey('ctrl', 'z')  # Needed to undo in case of printing a text file
-        pyautogui.sleep(1)
-
-    # Check the output (is it a directory or a filename?)
-    # output_file = process_output(file, output)
+        sequence = [
+            'K,Shift+Tab,3',  # Go to the "Print" button
+            'K,Enter,2',  # Two presses in case of confirmation dialog of an existing file
+            'K,Ctrl+Z'  # Needed to undo in case of printing a text file
+        ]
+    input_keyboard_sequence(sequence, args, debug)
+    sleep(1)
 
     return output_file
 
@@ -232,7 +356,7 @@ def print_libreoffice_linux(file: str, output: Optional[str], delay: Union[float
 
 
 
-def open_pdf_linux(file: str, delay: Union[float, Tuple[float, float]]):
+def open_pdf_linux(file: str, delay: Union[float, Tuple[float, float]], debug: bool = False):
     logger.debug(f"Opening PDF {file}")
     # subprocess.Popen(["evince", file])  # FIXME: This is not working
     subprocess.Popen(["firefox", "--new-window", file])
@@ -256,11 +380,11 @@ def open_pdf_linux(file: str, delay: Union[float, Tuple[float, float]]):
             subprocess.run(["wmctrl", "-ia", wid])
             logger.debug(f"Changing focus to {window_name}")
             break
-    pyautogui.sleep(1)
+    sleep(1)
 
     # Close the evince/firefox window
-    pyautogui.hotkey('alt', 'f4')
-    pyautogui.sleep(1)
+    input_key('Alt+F4', debug=debug)
+    sleep(1)
 
 
 def print_visually_linux(
@@ -268,7 +392,8 @@ def print_visually_linux(
         min_delay: float,
         max_delay: float,
         delay: float,
-        output: Optional[str]
+        output: Optional[str],
+        debug: bool = False
     ):
     for file in files:
         # Check if the file is an image
@@ -288,9 +413,9 @@ def print_visually_linux(
 
         open_pdf_linux(output_file, (min_delay, max_delay))
         os.system("wmctrl -xa gedit.Gedit")
-        pyautogui.sleep(1)
-        pyautogui.hotkey('alt', 'f4')
-        pyautogui.sleep(1)
+        sleep(1)
+        input_key('Alt+F4', debug=debug)  # Close gedit
+        sleep(1)
 
 
 
@@ -303,10 +428,18 @@ def print_in_linux(
         output: Optional[str]
     ):
     if visible:
-        print_visually_linux(files, min_delay, max_delay, delay, output)
+        logger.debug(f"Trying to acquire input lock on {LOCK_INPUT.lock_file}.")
+        with LOCK_INPUT.acquire():
+            logger.debug(f"Trying to acquire lock on {LOCK.lock_file}.")
+            with LOCK.acquire():
+                print_visually_linux(files, min_delay, max_delay, delay, output)
     else:
         pass
 
+
+def init():
+    _check_and_import_dependencies()
+    _setup_locks()
 
 
 def main():
@@ -316,38 +449,31 @@ def main():
     )
 
     # Make a visible and invisible arguments, they are mutually exclusive
-    parser.add_argument('--visible', action='store_true', help='Make the actions visible.', default=True)
-    parser.add_argument('--invisible', action='store_true', help='Make the actions invisible.', default=False)
-    parser.add_argument('--output', '-O', type=str, required=False, help='Output directory to save files to. If not a directory, it will be used as a filename. If not provided, the directory where the input files are will be used.')
     parser.add_argument('files', type=str, help='Files to print.', nargs='+')
+    parser.add_argument('--visible', action='store_true', help='Prints visually (using the GUI)', default=True)
+    parser.add_argument('--invisible', action='store_false', dest="visible", help='Prints through commands')
+    parser.add_argument('--output', '-O', type=str, required=False, help='Output directory to save files to. If not a directory, it will be used as a filename. If not provided, the directory where the input files are will be used.')
     parser.add_argument('--min-delay', type=float, default=5.0, help='Minimum delay between actions (in seconds).')
     parser.add_argument('--max-delay', type=float, default=10.0, help='Maximum delay between actions (in seconds).')
     parser.add_argument('--delay', type=float, default=None, help='Fixed delay between actions (in seconds). Overrides --min-delay and --max-delay.')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode.')
 
     # Parse arguments
-    args = parser.parse_args()
-
-
-    file_handler = RotatingFileHandler(
-        os.path.join(path, 'printer-simulation.log'),
-        maxBytes=1024*1024,
-        backupCount=3
-    )
-    file_handler.setFormatter(formatter)
-    file_handler.setLevel(logging.INFO)
-    logger.addHandler(file_handler)
+    args, unknown = parser.parse_known_args()
 
     if args.debug:
-        logger.setLevel(logging.DEBUG)
-        console_handler.setLevel(logging.DEBUG)
-        file_handler.setLevel(logging.DEBUG)
+        console_handler.setFormatter(formatter)
     else:
-        logger.setLevel(logging.INFO)
+        console_handler.setFormatter(LevelBasedFormatter())
+        console_handler.setLevel(logging.INFO)
 
-    # Preprocess options
-    visible = args.visible or not args.invisible
-    logger.debug(f"Printing will be {'visible' if visible else 'invisible'}")
+    logger.info("Starting printer-simulation.")
+    if unknown:
+        logger.warning(f"Unknown arguments ignored: {unknown}")
+
+    init()
+
+    logger.debug(f"Printing will be {'visible' if args.visible else 'invisible'}")
 
     # Set the current directory as the input (without the last part)
     input_dir = os.path.dirname(args.files[0])
@@ -357,11 +483,13 @@ def main():
     # Check the OS
     if get_system() == 'Windows':
         logger.debug("Running in Windows")
-        print_in_windows(visible, args.files, args.min_delay, args.max_delay, args.delay, args.output)
+        print_in_windows(args.visible, args.files, args.min_delay, args.max_delay, args.delay, args.output)
     else:
         logger.debug("Running in Linux")
-        print_in_linux(visible, args.files, args.min_delay, args.max_delay, args.delay, args.output)
+        print_in_linux(args.visible, args.files, args.min_delay, args.max_delay, args.delay, args.output)
 
 
 if __name__ == '__main__':
     main()
+else:
+    init()
