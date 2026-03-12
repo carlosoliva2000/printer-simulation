@@ -193,11 +193,11 @@ def get_system():
     
 
 def wait_for_program(program: str):
-    logger.debug(f"Waiting for {program} to load")
+    logger.debug(f"Waiting for {program} to load.")
     while True:
         result = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True)
         if program in result.stdout:
-            logger.debug(f"{program} is loaded")
+            logger.debug(f"{program} is loaded.")
             break
         sleep(1)  # Wait for 1 second before checking again
     sleep(2)  # Fail-safe sleep to ensure the program is fully loaded
@@ -207,7 +207,7 @@ def sleep_action(delay: Union[float, Tuple[float, float]], extra_delay: float = 
     if isinstance(delay, tuple):
         min_delay, max_delay = delay
         delay = random.uniform(min_delay, max_delay)
-    logger.debug(f"Sleeping for {delay} seconds (extra {extra_delay} seconds)")
+    logger.debug(f"Sleeping for {delay} seconds (extra {extra_delay} seconds).")
     sleep(delay + extra_delay)
 
 
@@ -215,10 +215,10 @@ def process_output(file: str, output: Optional[str] = None, is_libreoffice: bool
     if output:
         output = os.path.expanduser(output)
         if os.path.isdir(output):
-            logger.debug("Output is a directory, using the same filename as the input file")
+            logger.debug("Output is a directory, using the same filename as the input file.")
             output_file = os.path.join(output, os.path.basename(file) + '.pdf')
         else:
-            logger.debug("Output is a filename")
+            logger.debug("Output is a filename.")
             # If the output is a plain filename, output_file should be in the same directory as the input file
             # If not, it will be the output filename
             if os.path.isdir(os.path.dirname(output)):
@@ -228,10 +228,10 @@ def process_output(file: str, output: Optional[str] = None, is_libreoffice: bool
         
         if not is_libreoffice:
             # Move the file to the output directory
-            logger.debug(f"Moving the file to {output_file}")
+            logger.debug(f"Moving the file to {output_file}.")
             shutil.move(f"{file}.pdf", output_file)
     else:
-        logger.debug("No output directory provided, using the same directory as the input file")
+        logger.debug("No output directory provided, using the same directory as the input file.")
         output_file = file + '.pdf'
     
     return output_file
@@ -258,19 +258,20 @@ def start_print_process_visually(
         output: Optional[str], 
         delay: Union[float, Tuple[float, float]], 
         is_libreoffice: bool = False,
+        is_firefox: bool = False,
         debug: bool = False
     ) -> str:
     # Start the print dialog
-    logger.debug(f"Starting the print dialog for {file}")
+    logger.debug(f"Starting the print dialog for {file}.")
     sleep(2)
     input_key('Ctrl+P', debug=debug)
     sleep(3)
 
     # Go to the printers list
-    logger.debug("Selecting the printer")
+    logger.debug("Selecting the printer.")
     args = {
         "--press-interval": 0.5,
-        "--typing-interval": 0.1,
+        "--typing-interval": 0.2,
         "--sleep": 1.0
     }
     if is_libreoffice:
@@ -280,6 +281,17 @@ def start_print_process_visually(
             'T,"imprimir"',  # Change the printer to print to a file
             'S,0.0',
             'K,Enter,2'  # Select the printer
+        ]
+    elif is_firefox:
+        sequence = [
+            'K,Tab,5',  # Go to the print option
+            'K,Enter',  # Select the print option
+            'K,Tab',  # Go to the list of printers
+            'T,"imprimir"',  # Change the printer to print to a file
+            'S,0.0',
+            'K,Tab,2',  # Select the filename field,
+            'S,0.0',
+            'K,Enter'  # Press Enter to write the filename
         ]
     else:
         sequence = [
@@ -307,11 +319,22 @@ def start_print_process_visually(
 
     if is_libreoffice:
         # These are needed in case of confirmation dialog on an existing file
+        proc = subprocess.run(['wmctrl', '-lx'], capture_output=True, text=True)
+        save_windows_before = [line for line in proc.stdout.splitlines() if 'soffice.Soffice' in line]
         sequence = [
             'K,Tab',
             'K,Enter',
-            'K,Ctrl+Z,2'  # Needed to undo in case of printing a text file
+            # 'K,Ctrl+Z,2'  # Needed to undo in case of printing a text file
         ]
+        proc = subprocess.run(['wmctrl', '-lx'], capture_output=True, text=True)
+        save_windows_after = [line for line in proc.stdout.splitlines() if 'soffice.Soffice' in line]
+        if len(save_windows_after) > len(save_windows_before):
+            logger.debug("Confirmation dialog detected, confirming overwrite.")
+            sequence = [
+                'K,Tab',
+                'K,Enter'
+            ]
+            input_keyboard_sequence(sequence, args, debug)
     if not is_libreoffice:
         sequence = [
             'K,Shift+Tab,3',  # Go to the "Print" button
@@ -326,8 +349,10 @@ def start_print_process_visually(
 
 
 def print_image_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
-    subprocess.Popen(["eog", file])
-    logger.debug(f"Priting image {file}")
+    dir_path = os.path.dirname(os.path.abspath(os.path.expanduser(file)))
+    logger.info(f"Dir path: {dir_path}")
+    subprocess.Popen(["eog", file], cwd=dir_path)
+    logger.info(f"Priting image {file}...")
     # In case of eog, the program name is the name of the file (just the last part)
     wait_for_program(os.path.basename(file))
 
@@ -338,16 +363,17 @@ def print_image_linux(file: str, output: Optional[str], delay: Union[float, Tupl
 
 def print_text_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
     subprocess.Popen(["gedit", file])
-    logger.debug(f"Priting text file {file}")
+    logger.info(f"Priting text file {file}...")
     wait_for_program("gedit")
 
     output_file = start_print_process_visually(file, output, delay)
 
     return output_file
 
+
 def print_libreoffice_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
     subprocess.Popen(["libreoffice", file])
-    logger.debug(f"Priting LibreOffice file {file}")
+    logger.info(f"Priting LibreOffice file {file}...")
     wait_for_program("LibreOffice")
 
     output_file = start_print_process_visually(file, output, delay, is_libreoffice=True)
@@ -355,14 +381,24 @@ def print_libreoffice_linux(file: str, output: Optional[str], delay: Union[float
     return output_file
 
 
+def print_pdf_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
+    subprocess.Popen(["firefox", "--new-window", file])
+    logger.info(f"Priting PDF {file}...")
+    basename = os.path.basename(file)
+    wait_for_program(f"{basename} — Mozilla Firefox")
+
+    output_file = start_print_process_visually(file, output, delay, is_firefox=True)
+
+    return output_file
+
 
 def open_pdf_linux(file: str, delay: Union[float, Tuple[float, float]], debug: bool = False):
-    logger.debug(f"Opening PDF {file}")
+    logger.info(f"Opening generated PDF {file}.")
     # subprocess.Popen(["evince", file])  # FIXME: This is not working
     subprocess.Popen(["firefox", "--new-window", file])
     window_name = f"{file} — Mozilla Firefox".split("/")[-1]  # Get the last part of the path
     wait_for_program(window_name)
-    logger.debug("Simulating reading the PDF")
+    logger.info(f"Simulating reading the PDF...")
     sleep_action(delay)  # TODO: add actions such as zooming, scrolling, etc.
 
     # Ensure the focus is on the evince window
@@ -378,7 +414,7 @@ def open_pdf_linux(file: str, delay: Union[float, Tuple[float, float]], debug: b
             wid = line.split()[0]  # Get the window ID
             # Cambia el foco a la ventana
             subprocess.run(["wmctrl", "-ia", wid])
-            logger.debug(f"Changing focus to {window_name}")
+            logger.debug(f"Changing focus to {window_name}.")
             break
     sleep(1)
 
@@ -396,24 +432,34 @@ def print_visually_linux(
         debug: bool = False
     ):
     for file in files:
+        file = os.path.abspath(os.path.expanduser(file))
+
+        # Get the program based on the MIME type of the file
+        mime_type = subprocess.run(['xdg-mime', 'query', 'filetype', file], capture_output=True, text=True).stdout.strip()
+        program = subprocess.run(['xdg-mime', 'query', 'default', mime_type], capture_output=True, text=True).stdout.strip()
+        logger.debug(f"File {file} has MIME type {mime_type} and default program {program}.")
+    
         # Check if the file is an image
-        if file.endswith('.png') or file.endswith('.jpg') or file.endswith('.jpeg'):
-            logger.debug(f"Printing image {file}")
+        if "eog" in program or mime_type.startswith('image/'):
             output_file = print_image_linux(file, output, 0.125)
-        # Check if the file a text file
-        elif file.endswith('.txt') or file.endswith('.md') or file.endswith('.json'):
-            logger.debug(f"Printing text file {file}")
-            output_file = print_text_linux(file, output, 0.125)
-        # Check if the file a LibreOffice file
-        elif file.endswith('.odt') or file.endswith('.ods') or file.endswith('.odp'):
-            logger.debug(f"Printing LibreOffice file {file}")
+        # Check if the file is a LibreOffice file
+        elif "libreoffice" in program or mime_type in ['application/vnd.oasis.opendocument.text', 'application/vnd.oasis.opendocument.spreadsheet', 'application/vnd.oasis.opendocument.presentation', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.openxmlformats-officedocument.presentationml.presentation']:
+            logger.info(f"Printing LibreOffice file {file}")
             output_file = print_libreoffice_linux(file, output, 0.125)
+        # Check if the file is a PDF
+        elif "evince" in program or mime_type == 'application/pdf':
+            logger.info(f"Printing PDF file {file}")
+            output_file = print_pdf_linux(file, output, 0.125)
+        # Check if the file a text file
         else:
-            output_file = ""
+            logger.info(f"Printing text file {file}")
+            output_file = print_text_linux(file, output, 0.125)
+        # else:
+        #     output_file = ""
 
         open_pdf_linux(output_file, (min_delay, max_delay))
-        os.system("wmctrl -xa gedit.Gedit")
-        sleep(1)
+        # os.system("wmctrl -xa gedit.Gedit")
+        # sleep(1)
         input_key('Alt+F4', debug=debug)  # Close gedit
         sleep(1)
 
@@ -473,19 +519,14 @@ def main():
 
     init()
 
-    logger.debug(f"Printing will be {'visible' if args.visible else 'invisible'}")
-
-    # Set the current directory as the input (without the last part)
-    input_dir = os.path.dirname(args.files[0])
-    os.chdir(input_dir)
-    logger.debug(f"Woring directory: {input_dir}")
+    logger.debug(f"Printing will be {'visible' if args.visible else 'invisible'}.")
 
     # Check the OS
     if get_system() == 'Windows':
-        logger.debug("Running in Windows")
+        logger.debug("Running in Windows.")
         print_in_windows(args.visible, args.files, args.min_delay, args.max_delay, args.delay, args.output)
     else:
-        logger.debug("Running in Linux")
+        logger.debug("Running in Linux.")
         print_in_linux(args.visible, args.files, args.min_delay, args.max_delay, args.delay, args.output)
 
 
