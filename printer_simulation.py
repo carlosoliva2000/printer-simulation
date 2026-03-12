@@ -8,6 +8,7 @@ import shutil
 import importlib.util
 
 from time import sleep
+from pathlib import Path
 from typing import List, Optional, Tuple, Union
 from logging.handlers import RotatingFileHandler
 
@@ -211,25 +212,30 @@ def sleep_action(delay: Union[float, Tuple[float, float]], extra_delay: float = 
     sleep(delay + extra_delay)
 
 
-def process_output(file: str, output: Optional[str] = None, is_libreoffice: bool = False) -> str:
+def process_output(file: str, output: Optional[str] = None) -> str:
     if output:
-        output = os.path.expanduser(output)
-        if os.path.isdir(output):
+        aux_output = os.path.abspath(os.path.expanduser(output))
+        logger.debug(f"Output provided: {aux_output}")
+        if os.path.isdir(aux_output):
             logger.debug("Output is a directory, using the same filename as the input file.")
-            output_file = os.path.join(output, os.path.basename(file) + '.pdf')
+            output_file = os.path.join(aux_output, os.path.basename(file) + '.pdf')
         else:
             logger.debug("Output is a filename.")
             # If the output is a plain filename, output_file should be in the same directory as the input file
             # If not, it will be the output filename
-            if os.path.isdir(os.path.dirname(output)):
-                output_file = output
-            else:
+
+            # Check if output is just a filename (no directory part)
+            if not os.path.dirname(output):
+                logger.debug("Output is a plain filename, using the same directory as the input file.")
                 output_file = os.path.join(os.path.dirname(file), output)
-        
-        if not is_libreoffice:
-            # Move the file to the output directory
-            logger.debug(f"Moving the file to {output_file}.")
-            shutil.move(f"{file}.pdf", output_file)
+            
+            # Check if the directory part of the output is a valid directory
+            elif os.path.isdir(os.path.dirname(aux_output)):
+                logger.debug("Output is a filename with a valid directory.")
+                output_file = aux_output
+            else:
+                logger.error("Output must be a valid directory or filename.")
+                raise ValueError("Output must be a valid directory or filename.")
     else:
         logger.debug("No output directory provided, using the same directory as the input file.")
         output_file = file + '.pdf'
@@ -255,8 +261,7 @@ def print_in_windows(
 
 def start_print_process_visually(
         file: str, 
-        output: Optional[str], 
-        delay: Union[float, Tuple[float, float]], 
+        output: Optional[str],
         is_libreoffice: bool = False,
         is_firefox: bool = False,
         debug: bool = False
@@ -305,7 +310,7 @@ def start_print_process_visually(
         
     # Write the filename
     # Check the output (is it a directory or a filename?)
-    output_file = process_output(file, output, is_libreoffice)
+    output_file = process_output(file, output)
 
     sequence = [
         'K,Ctrl+A',  # Select all text
@@ -348,46 +353,45 @@ def start_print_process_visually(
 
 
 
-def print_image_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
+def print_image_linux(file: str, output: Optional[str], debug: bool = False):
     dir_path = os.path.dirname(os.path.abspath(os.path.expanduser(file)))
-    logger.info(f"Dir path: {dir_path}")
     subprocess.Popen(["eog", file], cwd=dir_path)
     logger.info(f"Priting image {file}...")
     # In case of eog, the program name is the name of the file (just the last part)
     wait_for_program(os.path.basename(file))
 
-    output_file = start_print_process_visually(file, output, delay)
+    output_file = start_print_process_visually(file, output, debug=debug)
 
     return output_file
 
 
-def print_text_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
+def print_text_linux(file: str, output: Optional[str], debug: bool = False):
     subprocess.Popen(["gedit", file])
     logger.info(f"Priting text file {file}...")
     wait_for_program("gedit")
 
-    output_file = start_print_process_visually(file, output, delay)
+    output_file = start_print_process_visually(file, output, debug=debug)
 
     return output_file
 
 
-def print_libreoffice_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
+def print_libreoffice_linux(file: str, output: Optional[str], debug: bool = False):
     subprocess.Popen(["libreoffice", file])
     logger.info(f"Priting LibreOffice file {file}...")
     wait_for_program("LibreOffice")
 
-    output_file = start_print_process_visually(file, output, delay, is_libreoffice=True)
+    output_file = start_print_process_visually(file, output, is_libreoffice=True, debug=debug)
 
     return output_file
 
 
-def print_pdf_linux(file: str, output: Optional[str], delay: Union[float, Tuple[float, float]]):
+def print_pdf_linux(file: str, output: Optional[str], debug: bool = False):
     subprocess.Popen(["firefox", "--new-window", file])
     logger.info(f"Priting PDF {file}...")
     basename = os.path.basename(file)
     wait_for_program(f"{basename} — Mozilla Firefox")
 
-    output_file = start_print_process_visually(file, output, delay, is_firefox=True)
+    output_file = start_print_process_visually(file, output, is_firefox=True, debug=debug)
 
     return output_file
 
@@ -425,9 +429,7 @@ def open_pdf_linux(file: str, delay: Union[float, Tuple[float, float]], debug: b
 
 def print_visually_linux(
         files: List[str],
-        min_delay: float,
-        max_delay: float,
-        delay: float,
+        delay: Union[float, Tuple[float, float]],
         output: Optional[str],
         debug: bool = False
     ):
@@ -441,36 +443,150 @@ def print_visually_linux(
     
         # Check if the file is an image
         if "eog" in program or mime_type.startswith('image/'):
-            output_file = print_image_linux(file, output, 0.125)
+            output_file = print_image_linux(file, output, debug)
         # Check if the file is a LibreOffice file
         elif "libreoffice" in program or mime_type in ['application/vnd.oasis.opendocument.text', 'application/vnd.oasis.opendocument.spreadsheet', 'application/vnd.oasis.opendocument.presentation', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.openxmlformats-officedocument.presentationml.presentation']:
-            logger.info(f"Printing LibreOffice file {file}")
-            output_file = print_libreoffice_linux(file, output, 0.125)
+            logger.info(f"Printing LibreOffice file {file}.")
+            output_file = print_libreoffice_linux(file, output, debug)
         # Check if the file is a PDF
         elif "evince" in program or mime_type == 'application/pdf':
-            logger.info(f"Printing PDF file {file}")
-            output_file = print_pdf_linux(file, output, 0.125)
+            logger.info(f"Printing PDF file {file}.")
+            output_file = print_pdf_linux(file, output, debug)
         # Check if the file a text file
         else:
-            logger.info(f"Printing text file {file}")
-            output_file = print_text_linux(file, output, 0.125)
+            logger.info(f"Printing text file {file}.")
+            output_file = print_text_linux(file, output, debug)
         # else:
         #     output_file = ""
 
-        open_pdf_linux(output_file, (min_delay, max_delay))
+        open_pdf_linux(output_file, delay, debug)
         # os.system("wmctrl -xa gedit.Gedit")
         # sleep(1)
         input_key('Alt+F4', debug=debug)  # Close gedit
         sleep(1)
 
 
+def start_print_process_invisibly(
+    file: str, 
+    output: Optional[str],
+    is_libreoffice: bool = False,
+    debug: bool = False
+) -> str:
+    input_file = Path(file).resolve()
+    pdf_dir = Path.home() / "PDF"
+    pdf_dir.mkdir(exist_ok=True)
+
+    if is_libreoffice:
+        logger.debug("Converting LibreOffice file to PDF using soffice command.")
+        subprocess.run([
+            "libreoffice", 
+            "--headless", 
+            "--convert-to", 
+            "pdf", 
+            "--outdir", 
+            str(pdf_dir), 
+            str(input_file)], 
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        output_file = process_output(str(input_file), output)
+        generated_pdf = pdf_dir / (input_file.stem + ".pdf")
+        if generated_pdf.exists():
+            if output_file != str(generated_pdf):
+                shutil.move(str(generated_pdf), output_file)
+                logger.debug(f"Moved generated PDF from {generated_pdf} to {output_file}.")
+            else:
+                logger.debug(f"Generated PDF is already in the desired location: {output_file}.")
+            return output_file
+        else:
+            raise FileNotFoundError(f"LibreOffice conversion did not produce the expected PDF file {generated_pdf}.")
+
+    # Get existing PDF files in the PDF directory
+    existing_pdfs = set(pdf_dir.glob("*.pdf"))
+    logger.debug(f"Existing PDF files in {pdf_dir}: {[str(p) for p in existing_pdfs]}.")
+
+    # Start the printing process
+    subprocess.run(
+        ["lp", "-d", "PDF",  str(input_file)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True
+    )
+
+    # Wait for a new PDF file to appear in the PDF directory
+    new_pdf = None
+    timeout = 5  # iterations
+    logger.debug(f"Waiting for the new PDF file to appear in {pdf_dir}...")
+    for _ in range(timeout):
+        sleep(1)  # wait for 1 second before checking again
+        current_pdfs = set(pdf_dir.glob("*.pdf"))
+        # print(f"Current PDF files in {pdf_dir}: {[str(p) for p in current_pdfs]}")
+        new_files = current_pdfs - existing_pdfs
+        logger.debug(f"New PDF files detected: {[str(p) for p in new_files]}.")
+        # print(f"Raw new files: {new_files}")
+        # print(f"Type of new_files: {type(new_files)}")
+
+        # Filter possible candidates based on the input file name
+        # for f in new_files:
+        #     print(f"Checking new file {f} with name {f.name}")
+        #     print(f"Is {f.name} equal to {input_file.name}? Is {str(f)} equal to {input_file}?")
+        #     print()
+        candidates = [f for f in new_files if input_file.name in f.name]
+        logger.debug(f"Filtered candidates based on input file name: {[str(p) for p in candidates]}.")
+        if candidates:
+            # Take the most recently modified candidate
+            new_pdf = max(candidates, key=lambda f: f.stat().st_mtime)
+            logger.debug(f"Selected new PDF file: {new_pdf}.")
+            break
+        print()
+
+    if new_pdf is None:
+        raise FileNotFoundError(f"No new PDF file was created in the PDF directory for input file {file}.")
+    
+    # Check what output is: directory or filename
+    output_file = process_output(str(input_file), output)
+
+    # Move the new PDF to the desired output location
+    if output_file != str(new_pdf):
+        shutil.move(str(new_pdf), output_file)
+        logger.debug(f"Moved generated PDF from {new_pdf} to {output_file}.")
+    else:
+        logger.debug(f"Generated PDF is already in the desired location: {output_file}.")
+    
+    return output_file
+
+
+
+def print_invisibly_linux(
+    files: List[str],
+    output: Optional[str],
+    debug: bool = False
+):
+    for file in files:
+        file = os.path.abspath(os.path.expanduser(file))
+
+        # Get the program based on the MIME type of the file
+        mime_type = subprocess.run(['xdg-mime', 'query', 'filetype', file], capture_output=True, text=True).stdout.strip()
+        program = subprocess.run(['xdg-mime', 'query', 'default', mime_type], capture_output=True, text=True).stdout.strip()
+        logger.debug(f"File {file} has MIME type {mime_type} and default program {program}.")
+
+        # Check if the file is a LibreOffice file
+        if "libreoffice" in program or mime_type in ['application/vnd.oasis.opendocument.text', 'application/vnd.oasis.opendocument.spreadsheet', 'application/vnd.oasis.opendocument.presentation', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.openxmlformats-officedocument.presentationml.presentation']:
+            logger.info(f"Printing LibreOffice file {file}.")
+            output_file = start_print_process_invisibly(file, output, is_libreoffice=True, debug=debug)
+        else:
+            logger.info(f"Printing file {file} using lp command.")
+            output_file = start_print_process_invisibly(file, output, debug=debug)
+
+        # open_pdf_linux(output_file, delay, debug)  # Not needed in invisible mode
+
 
 def print_in_linux(
         visible: bool, 
         files: List[str],
-        min_delay: float,
-        max_delay: float,
-        delay: float,
+        delay: Union[float, Tuple[float, float]],
         output: Optional[str]
     ):
     if visible:
@@ -478,9 +594,10 @@ def print_in_linux(
         with LOCK_INPUT.acquire():
             logger.debug(f"Trying to acquire lock on {LOCK.lock_file}.")
             with LOCK.acquire():
-                print_visually_linux(files, min_delay, max_delay, delay, output)
+                print_visually_linux(files, delay, output)
     else:
-        pass
+        print_invisibly_linux(files, output)
+        
 
 
 def init():
@@ -499,8 +616,8 @@ def main():
     parser.add_argument('--visible', action='store_true', help='Prints visually (using the GUI)', default=True)
     parser.add_argument('--invisible', action='store_false', dest="visible", help='Prints through commands')
     parser.add_argument('--output', '-O', type=str, required=False, help='Output directory to save files to. If not a directory, it will be used as a filename. If not provided, the directory where the input files are will be used.')
-    parser.add_argument('--min-delay', type=float, default=5.0, help='Minimum delay between actions (in seconds).')
-    parser.add_argument('--max-delay', type=float, default=10.0, help='Maximum delay between actions (in seconds).')
+    parser.add_argument('--min-delay', type=float, default=None, help='Minimum delay between actions (in seconds).')
+    parser.add_argument('--max-delay', type=float, default=None, help='Maximum delay between actions (in seconds).')
     parser.add_argument('--delay', type=float, default=None, help='Fixed delay between actions (in seconds). Overrides --min-delay and --max-delay.')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode.')
 
@@ -521,13 +638,77 @@ def main():
 
     logger.debug(f"Printing will be {'visible' if args.visible else 'invisible'}.")
 
+    output_check = os.path.abspath(os.path.expanduser(args.output)) if args.output is not None else None
+    if output_check and not os.path.isdir(output_check) and len(args.files) > 1:
+        logger.error("If multiple files are provided, the output must be a directory.")
+        exit(1)
+
+    if args.visible:
+        # Visible mode
+        if args.min_delay is None and args.max_delay is None and args.delay is None:
+            args.min_delay = 5.0
+            args.max_delay = 10.0
+            delay = (args.min_delay, args.max_delay)
+            logger.info("No delay provided, using default min-delay=5.0 and max-delay=10.0 seconds.")
+        elif args.delay is not None:
+            if args.delay < 0:
+                logger.error("Delay must be a positive number.")
+                exit(1)
+            
+            if args.min_delay is not None or args.max_delay is not None:
+                logger.warning("Both delay and min-delay/max-delay provided, using delay and ignoring min-delay and max-delay.")
+            
+            args.min_delay = None
+            args.max_delay = None
+            delay = args.delay
+        else:
+            if args.min_delay is None and args.max_delay is not None:
+                args.delay = args.max_delay
+                args.max_delay = None
+                if args.delay < 0:
+                    logger.error("Max delay must be a positive number.")
+                    exit(1)
+                logger.warning(f"Only max-delay provided, using delay={args.delay} seconds.")
+                delay = args.delay
+            elif args.min_delay is not None and args.max_delay is None:
+                args.delay = args.min_delay
+                args.min_delay = None
+                if args.delay < 0:
+                    logger.error("Min delay must be a positive number.")
+                    exit(1)
+                logger.warning(f"Only min-delay provided, using delay={args.delay} seconds.")
+                delay = args.delay
+            else:
+                if args.min_delay < 0 or args.max_delay < 0:
+                    logger.error("Min and max delay must be positive numbers.")
+                    exit(1)
+                elif args.min_delay == args.max_delay:
+                    args.delay = args.min_delay
+                    args.min_delay = None
+                    args.max_delay = None
+                    logger.info(f"Min-delay and max-delay are the same, using delay={args.delay} seconds.")
+                    delay = args.delay
+                elif args.min_delay > args.max_delay:
+                    logger.error("Min delay must be less than or equal to max delay.")
+                    exit(1)
+                else:
+                    delay = (args.min_delay, args.max_delay)
+        logger.debug(f"Using delay: {delay} seconds.")
+    else:
+        # Invisible mode
+        if args.delay is not None or args.min_delay is not None or args.max_delay is not None:
+            logger.warning("Delay arguments are ignored in invisible mode.")
+        delay = 0.0  # No delay needed in invisible mode
+    
     # Check the OS
     if get_system() == 'Windows':
         logger.debug("Running in Windows.")
         print_in_windows(args.visible, args.files, args.min_delay, args.max_delay, args.delay, args.output)
     else:
         logger.debug("Running in Linux.")
-        print_in_linux(args.visible, args.files, args.min_delay, args.max_delay, args.delay, args.output)
+        print_in_linux(args.visible, args.files, delay, args.output)
+
+    logger.info("Finishing printer-simulation.")
 
 
 if __name__ == '__main__':
