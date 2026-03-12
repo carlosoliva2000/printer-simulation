@@ -1,6 +1,7 @@
 import os
 import random
 import subprocess
+import time
 import re
 import logging
 import argparse
@@ -11,6 +12,13 @@ from time import sleep
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 from logging.handlers import RotatingFileHandler
+
+
+# Globals
+
+FILE_PROGRAM_PROC = None
+PRINT_PROGRAM_PROC = None
+CONTENTION_THRESHOLD = 0.5  # Seconds to consider that there is contention on the lock (i.e., that it was not acquired immediately)
 
 
 # Logging setup
@@ -48,6 +56,112 @@ logger.addHandler(file_handler)
 
 # Dependencies and DISPLAY check
 
+def _get_active_x11_session():
+    """
+    Returns (user, uid, runtime_path) if an active X11 session exists.
+    Otherwise returns (None, None, None).
+    """
+    result = subprocess.run(
+        ["loginctl", "--no-legend", "list-sessions"],
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+        return None, None, None
+
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+
+        session, uid, user = parts[:3]
+
+        info = subprocess.run(
+            ["loginctl", "show-session", session],
+            capture_output=True,
+            text=True
+        )
+
+        data = {}
+        for l in info.stdout.splitlines():
+            if "=" in l:
+                k, v = l.split("=", 1)
+                data[k] = v
+
+        if data.get("Active") == "yes" and data.get("Type") == "x11":
+
+            runtime_info = subprocess.run(
+                ["loginctl", "show-user", user, "-p", "RuntimePath"],
+                capture_output=True,
+                text=True
+            )
+
+            runtime_path = None
+            if runtime_info.returncode == 0:
+                line = runtime_info.stdout.strip()
+                if "=" in line:
+                    runtime_path = line.split("=", 1)[1]
+
+            return user, uid, runtime_path
+
+    return None, None, None
+
+
+def _ensure_graphical_session(timeout=120):
+    logger.info("Ensuring graphical session is ready...")
+
+    start = time.perf_counter()
+
+    while time.perf_counter() - start < timeout:
+        user, uid, runtime_path = _get_active_x11_session()
+
+        if not user:
+            logger.debug("No active X11 session yet...")
+            time.sleep(1)
+            continue
+
+        if not runtime_path:
+            logger.debug("RuntimePath not available yet...")
+            time.sleep(1)
+            continue
+
+        xauthority = os.path.join(runtime_path, "gdm", "Xauthority")
+
+        if not os.path.exists(xauthority):
+            logger.debug(f"Xauthority not found at {xauthority}")
+            time.sleep(1)
+            continue
+
+        env = os.environ.copy()
+        env["DISPLAY"] = ":0"
+        env["XAUTHORITY"] = xauthority
+
+        result = subprocess.run(
+            ["xdpyinfo"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        if result.returncode == 0:
+            logger.info(f"Graphical session ready for user {user}.")
+            os.environ["DISPLAY"] = ":0"
+            os.environ["XAUTHORITY"] = xauthority
+            logger.info("Waiting an additional 1 second to ensure the session is fully ready...")
+            time.sleep(1)
+            return
+
+        logger.debug("X server not accepting connections yet...")
+        time.sleep(1)
+
+    logger.error("Timeout waiting for graphical session.")
+    exit(1)
+
+
 def _check_binary(name: str) -> bool:
     """Check if a binary is installed."""
     res = subprocess.run(['which', name], capture_output=True, text=True)
@@ -63,11 +177,6 @@ def _check_and_import_dependencies():
     """Check if all dependencies are installed and import them."""
     logger.debug("Checking dependencies...")
     try:
-        # Check if DISPLAY variable is set
-        logger.debug("Checking DISPLAY environment variable...")
-        if 'DISPLAY' not in os.environ:
-            raise EnvironmentError("DISPLAY environment variable is not set. Please run this script in a graphical environment.")
-
         # Check if dependencies are installed
         logger.debug("Checking required binaries and Python packages...")
         binaries = ['firefox', 'eog', 'libreoffice', 'gedit', 'wmctrl', 'input-simulation']
@@ -130,8 +239,8 @@ Please install them and try again."""
 
 def _setup_locks():
     global LOCK, LOCK_INPUT
-    LOCK = FileLock(os.path.join("/", "opt", "scripts", ".printer.lock"))
-    LOCK_INPUT = FileLock(os.path.join("/", "opt", "scripts", ".input.lock"))
+    LOCK = FileLock(os.path.join("/", "opt", "locks", ".printer.lock"))
+    LOCK_INPUT = FileLock(os.path.join("/", "opt", "locks", ".input.lock"))
 
 
 # Input simulation functions
@@ -186,6 +295,32 @@ def input_sequence(sequence: List[str], args: Optional[dict] = None, debug: bool
 
 # Auxiliary functions
 
+def proc_to_str(proc: subprocess.Popen) -> str:
+    """Convert a subprocess.Popen object to a string for logging."""
+    if isinstance(proc.args, list):
+        cmd = ' '.join(proc.args)
+    else:
+        cmd = str(proc.args)
+    return cmd
+
+
+def close_failsafe(proc: subprocess.Popen):
+    """Failsafe to close a proc if something goes wrong."""
+    sleep(2)
+    proc_name = f"'{proc_to_str(proc)}'"
+    if proc.poll() is None:  # If the process is still running
+        logger.debug(f"{proc_name} process (PID: {proc.pid}) is still running, terminating it (SIGTERM).")
+        proc.terminate()
+        
+        try:
+            proc.wait(timeout=5)  # Wait for the process to terminate gracefully
+            logger.debug(f"{proc_name} process terminated gracefully.")
+        except subprocess.TimeoutExpired:
+            logger.debug(f"{proc_name} process did not terminate, killing it (SIGKILL).")
+            proc.kill()
+            proc.wait()
+
+
 def get_system():
     if os.name == 'nt':
         return 'Windows'
@@ -193,12 +328,12 @@ def get_system():
         return 'Linux'
     
 
-def wait_for_program(program: str):
+def wait_for_program(program: str, pid: Optional[int] = None):
     logger.debug(f"Waiting for {program} to load.")
     while True:
         result = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True)
         if program in result.stdout:
-            logger.debug(f"{program} is loaded.")
+            logger.debug(f"{program} (PID: {pid}) is loaded.")
             break
         sleep(1)  # Wait for 1 second before checking again
     sleep(2)  # Fail-safe sleep to ensure the program is fully loaded
@@ -241,6 +376,24 @@ def process_output(file: str, output: Optional[str] = None) -> str:
         output_file = file + '.pdf'
     
     return output_file
+
+
+def get_random_file_from_dir(dir: str) -> Optional[str]:
+    logger.info(f"Getting a random file from directory {dir}.")
+    files = [f for f in os.listdir(dir) if not os.path.isdir(f)]
+    if not files:
+        logger.info(f"No files found in {dir}.")
+        return None
+    
+    random_file = os.path.abspath(
+        os.path.join(
+            dir, 
+            random.choice(files)
+        )
+    )
+    logger.info(f"Random file chosen: {random_file}.")
+    
+    return os.path.join(dir, random_file)
 
 
 # Windows printing functions (not implemented yet)
@@ -355,53 +508,65 @@ def start_print_process_visually(
 
 def print_image_linux(file: str, output: Optional[str], debug: bool = False):
     dir_path = os.path.dirname(os.path.abspath(os.path.expanduser(file)))
-    subprocess.Popen(["eog", file], cwd=dir_path)
+    
+    global FILE_PROGRAM_PROC
+    FILE_PROGRAM_PROC = subprocess.Popen(["eog", file], cwd=dir_path)
     logger.info(f"Priting image {file}...")
     # In case of eog, the program name is the name of the file (just the last part)
-    wait_for_program(os.path.basename(file))
+    program_name = os.path.basename(file)
+    wait_for_program(program_name, pid=FILE_PROGRAM_PROC.pid)
 
     output_file = start_print_process_visually(file, output, debug=debug)
 
-    return output_file
+    return output_file, program_name
 
 
 def print_text_linux(file: str, output: Optional[str], debug: bool = False):
-    subprocess.Popen(["gedit", file])
+    global FILE_PROGRAM_PROC
+    FILE_PROGRAM_PROC = subprocess.Popen(["gedit", file])
     logger.info(f"Priting text file {file}...")
-    wait_for_program("gedit")
+    program_name = "gedit"
+    wait_for_program(program_name, pid=FILE_PROGRAM_PROC.pid)
 
     output_file = start_print_process_visually(file, output, debug=debug)
 
-    return output_file
+    return output_file, program_name
 
 
 def print_libreoffice_linux(file: str, output: Optional[str], debug: bool = False):
-    subprocess.Popen(["libreoffice", file])
+    global FILE_PROGRAM_PROC
+    FILE_PROGRAM_PROC = subprocess.Popen(["libreoffice", "--norestore", "--nologo", file])
     logger.info(f"Priting LibreOffice file {file}...")
-    wait_for_program("LibreOffice")
+    program_name = "LibreOffice"
+    wait_for_program(program_name, pid=FILE_PROGRAM_PROC.pid)
 
     output_file = start_print_process_visually(file, output, is_libreoffice=True, debug=debug)
 
-    return output_file
+    return output_file, program_name
 
 
 def print_pdf_linux(file: str, output: Optional[str], debug: bool = False):
-    subprocess.Popen(["firefox", "--new-window", file])
+    global FILE_PROGRAM_PROC
+    FILE_PROGRAM_PROC = subprocess.Popen(["firefox", "--new-window", file])
     logger.info(f"Priting PDF {file}...")
     basename = os.path.basename(file)
-    wait_for_program(f"{basename} — Mozilla Firefox")
+    program_name = f"{basename} — Mozilla Firefox"
+    wait_for_program(program_name, pid=FILE_PROGRAM_PROC.pid)
 
     output_file = start_print_process_visually(file, output, is_firefox=True, debug=debug)
 
-    return output_file
+    return output_file, program_name
 
 
 def open_pdf_linux(file: str, delay: Union[float, Tuple[float, float]], debug: bool = False):
     logger.info(f"Opening generated PDF {file}.")
-    # subprocess.Popen(["evince", file])  # FIXME: This is not working
-    subprocess.Popen(["firefox", "--new-window", file])
+    
+    global PRINT_PROGRAM_PROC
+    
+    # PRINT_PROGRAM_PROC = subprocess.Popen(["evince", file])  # FIXME: This is not working
+    PRINT_PROGRAM_PROC = subprocess.Popen(["firefox", "--new-window", file])
     window_name = f"{file} — Mozilla Firefox".split("/")[-1]  # Get the last part of the path
-    wait_for_program(window_name)
+    wait_for_program(window_name, pid=PRINT_PROGRAM_PROC.pid)
     logger.info(f"Simulating reading the PDF...")
     sleep_action(delay)  # TODO: add actions such as zooming, scrolling, etc.
 
@@ -424,6 +589,7 @@ def open_pdf_linux(file: str, delay: Union[float, Tuple[float, float]], debug: b
 
     # Close the evince/firefox window
     input_key('Alt+F4', debug=debug)
+    close_failsafe(PRINT_PROGRAM_PROC)
     sleep(1)
 
 
@@ -433,8 +599,14 @@ def print_visually_linux(
         output: Optional[str],
         debug: bool = False
     ):
+    global FILE_PROGRAM_PROC
+    
     for file in files:
         file = os.path.abspath(os.path.expanduser(file))
+        if os.path.isdir(file):  # Get random file if a dir is provided
+            file = get_random_file_from_dir(file)
+            if file is None:
+                return
 
         # Get the program based on the MIME type of the file
         mime_type = subprocess.run(['xdg-mime', 'query', 'filetype', file], capture_output=True, text=True).stdout.strip()
@@ -443,26 +615,37 @@ def print_visually_linux(
     
         # Check if the file is an image
         if "eog" in program or mime_type.startswith('image/'):
-            output_file = print_image_linux(file, output, debug)
+            output_file, program = print_image_linux(file, output, debug)
         # Check if the file is a LibreOffice file
         elif "libreoffice" in program or mime_type in ['application/vnd.oasis.opendocument.text', 'application/vnd.oasis.opendocument.spreadsheet', 'application/vnd.oasis.opendocument.presentation', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.openxmlformats-officedocument.presentationml.presentation']:
             logger.info(f"Printing LibreOffice file {file}.")
-            output_file = print_libreoffice_linux(file, output, debug)
+            output_file, program = print_libreoffice_linux(file, output, debug)
         # Check if the file is a PDF
         elif "evince" in program or mime_type == 'application/pdf':
             logger.info(f"Printing PDF file {file}.")
-            output_file = print_pdf_linux(file, output, debug)
+            output_file, program = print_pdf_linux(file, output, debug)
         # Check if the file a text file
         else:
             logger.info(f"Printing text file {file}.")
-            output_file = print_text_linux(file, output, debug)
+            output_file, program = print_text_linux(file, output, debug)
         # else:
         #     output_file = ""
 
         open_pdf_linux(output_file, delay, debug)
-        # os.system("wmctrl -xa gedit.Gedit")
-        # sleep(1)
-        input_key('Alt+F4', debug=debug)  # Close gedit
+
+        # Focus again on the original program
+        res = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True)
+        lines = res.stdout.splitlines()
+        for line in lines:
+            if program in line:
+                wid = line.split()[0]  # Get the window ID
+                subprocess.run(["wmctrl", "-ia", wid])
+                logger.debug(f"Changing focus back to {program}.")
+                break
+        sleep(1)
+        
+        input_key('Alt+F4', debug=debug)  # Close the file viewer
+        close_failsafe(FILE_PROGRAM_PROC)
         sleep(1)
 
 
@@ -566,6 +749,10 @@ def print_invisibly_linux(
 ):
     for file in files:
         file = os.path.abspath(os.path.expanduser(file))
+        if os.path.isdir(file):  # Get random file if a dir is provided
+            file = get_random_file_from_dir(file)
+            if file is None:
+                return
 
         # Get the program based on the MIME type of the file
         mime_type = subprocess.run(['xdg-mime', 'query', 'filetype', file], capture_output=True, text=True).stdout.strip()
@@ -591,16 +778,105 @@ def print_in_linux(
     ):
     if visible:
         logger.debug(f"Trying to acquire input lock on {LOCK_INPUT.lock_file}.")
+        start_t = time.perf_counter()
         with LOCK_INPUT.acquire():
+            waited_t = time.perf_counter() - start_t
+            if waited_t > CONTENTION_THRESHOLD:
+                logger.debug(f"Input lock acquired after waiting {waited_t:.2f} seconds (contention detected).")
+            else:
+                logger.debug(f"Input lock acquired immediately (no contention).")
+            
+            disable_user_input()
+            
             logger.debug(f"Trying to acquire lock on {LOCK.lock_file}.")
+            start_t = time.perf_counter()
             with LOCK.acquire():
+                waited_t = time.perf_counter() - start_t
+                if waited_t > CONTENTION_THRESHOLD:
+                    logger.debug(f"Lock acquired after waiting {waited_t:.2f} seconds (contention detected).")
+                else:
+                    logger.debug(f"Lock acquired immediately (no contention).")
+                    
                 print_visually_linux(files, delay, output)
+                enable_user_input()
     else:
         print_invisibly_linux(files, output)
-        
 
 
-def init():
+# Input control
+
+def get_user_input_device_ids():
+    EXCLUDED_KEYWORDS = [
+        "Virtual core",
+        "XTEST",
+        "Power Button",
+        "Sleep Button",
+        "Video Bus"
+    ]
+    
+    result = subprocess.run(
+        ["xinput", "list"],
+        stdout=subprocess.PIPE,
+        text=True
+    )
+
+    device_ids = []
+    for line in result.stdout.splitlines():
+        match = re.search(r'id=(\d+)', line)
+        if not match:
+            continue
+
+        device_id = int(match.group(1))
+        name = line.split("id=")[0].strip()
+
+        if any(keyword in name for keyword in EXCLUDED_KEYWORDS):
+            continue
+
+        device_ids.append(device_id)
+    
+    logger.debug(f"Detected user input devices: {device_ids}")
+
+    return device_ids
+
+
+def _set_input_devices(enabled: bool):
+    """
+    Enable or disable user input devices using xinput.
+    """
+    # USER_INPUT_DEVICE_IDS = [9, 10, 11]
+    
+    action = "enable" if enabled else "disable"
+    for dev_id in get_user_input_device_ids():
+        try:
+            res = subprocess.run(
+                ["xinput", action, str(dev_id)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            logger.debug(f"xinput {action} {dev_id}")
+            if res.returncode != 0:
+                logger.warning(f"xinput non-zero return code: {res.returncode}")
+                logger.error(f"xinput error: {res.stderr}")
+        except Exception as e:
+            logger.error(f"Failed to {action} device {dev_id}: {e}")
+    sleep(2)  # Fail-safe
+
+
+def disable_user_input():
+    logger.debug("Disabling user input devices.")
+    _set_input_devices(False)
+
+
+def enable_user_input():
+    logger.debug("Enabling user input devices.")
+    _set_input_devices(True)
+
+
+
+def init(check_display: bool = False):
+    if check_display and get_system() == 'Linux':
+        _ensure_graphical_session()
     _check_and_import_dependencies()
     _setup_locks()
 
@@ -612,8 +888,8 @@ def main():
     )
 
     # Make a visible and invisible arguments, they are mutually exclusive
-    parser.add_argument('files', type=str, help='Files to print.', nargs='+')
-    parser.add_argument('--visible', action='store_true', help='Prints visually (using the GUI)', default=True)
+    parser.add_argument('files', type=str, help='Files to print. If it is a directory, a random file will be picked.', nargs='+')
+    parser.add_argument('--visible', action='store_true', help='Prints visually (using the GUI).', default=True)
     parser.add_argument('--invisible', action='store_false', dest="visible", help='Prints through commands')
     parser.add_argument('--output', '-O', type=str, required=False, help='Output directory to save files to. If not a directory, it will be used as a filename. If not provided, the directory where the input files are will be used.')
     parser.add_argument('--min-delay', type=float, default=None, help='Minimum delay between actions (in seconds).')
@@ -634,81 +910,91 @@ def main():
     if unknown:
         logger.warning(f"Unknown arguments ignored: {unknown}")
 
-    init()
+    init(check_display=bool(args.visible))
+    
+    try:
+        logger.debug(f"Printing will be {'visible' if args.visible else 'invisible'}.")
 
-    logger.debug(f"Printing will be {'visible' if args.visible else 'invisible'}.")
+        output_check = os.path.abspath(os.path.expanduser(args.output)) if args.output is not None else None
+        if output_check and not os.path.isdir(output_check) and len(args.files) > 1:
+            logger.error("If multiple files are provided, the output must be a directory.")
+            exit(1)
 
-    output_check = os.path.abspath(os.path.expanduser(args.output)) if args.output is not None else None
-    if output_check and not os.path.isdir(output_check) and len(args.files) > 1:
-        logger.error("If multiple files are provided, the output must be a directory.")
-        exit(1)
-
-    if args.visible:
-        # Visible mode
-        if args.min_delay is None and args.max_delay is None and args.delay is None:
-            args.min_delay = 5.0
-            args.max_delay = 10.0
-            delay = (args.min_delay, args.max_delay)
-            logger.info("No delay provided, using default min-delay=5.0 and max-delay=10.0 seconds.")
-        elif args.delay is not None:
-            if args.delay < 0:
-                logger.error("Delay must be a positive number.")
-                exit(1)
-            
-            if args.min_delay is not None or args.max_delay is not None:
-                logger.warning("Both delay and min-delay/max-delay provided, using delay and ignoring min-delay and max-delay.")
-            
-            args.min_delay = None
-            args.max_delay = None
-            delay = args.delay
-        else:
-            if args.min_delay is None and args.max_delay is not None:
-                args.delay = args.max_delay
-                args.max_delay = None
+        if args.visible:
+            # Visible mode
+            if args.min_delay is None and args.max_delay is None and args.delay is None:
+                args.min_delay = 5.0
+                args.max_delay = 10.0
+                delay = (args.min_delay, args.max_delay)
+                logger.info("No delay provided, using default min-delay=5.0 and max-delay=10.0 seconds.")
+            elif args.delay is not None:
                 if args.delay < 0:
-                    logger.error("Max delay must be a positive number.")
+                    logger.error("Delay must be a positive number.")
                     exit(1)
-                logger.warning(f"Only max-delay provided, using delay={args.delay} seconds.")
-                delay = args.delay
-            elif args.min_delay is not None and args.max_delay is None:
-                args.delay = args.min_delay
+                
+                if args.min_delay is not None or args.max_delay is not None:
+                    logger.warning("Both delay and min-delay/max-delay provided, using delay and ignoring min-delay and max-delay.")
+                
                 args.min_delay = None
-                if args.delay < 0:
-                    logger.error("Min delay must be a positive number.")
-                    exit(1)
-                logger.warning(f"Only min-delay provided, using delay={args.delay} seconds.")
+                args.max_delay = None
                 delay = args.delay
             else:
-                if args.min_delay < 0 or args.max_delay < 0:
-                    logger.error("Min and max delay must be positive numbers.")
-                    exit(1)
-                elif args.min_delay == args.max_delay:
+                if args.min_delay is None and args.max_delay is not None:
+                    args.delay = args.max_delay
+                    args.max_delay = None
+                    if args.delay < 0:
+                        logger.error("Max delay must be a positive number.")
+                        exit(1)
+                    logger.warning(f"Only max-delay provided, using delay={args.delay} seconds.")
+                    delay = args.delay
+                elif args.min_delay is not None and args.max_delay is None:
                     args.delay = args.min_delay
                     args.min_delay = None
-                    args.max_delay = None
-                    logger.info(f"Min-delay and max-delay are the same, using delay={args.delay} seconds.")
+                    if args.delay < 0:
+                        logger.error("Min delay must be a positive number.")
+                        exit(1)
+                    logger.warning(f"Only min-delay provided, using delay={args.delay} seconds.")
                     delay = args.delay
-                elif args.min_delay > args.max_delay:
-                    logger.error("Min delay must be less than or equal to max delay.")
-                    exit(1)
                 else:
-                    delay = (args.min_delay, args.max_delay)
-        logger.debug(f"Using delay: {delay} seconds.")
-    else:
-        # Invisible mode
-        if args.delay is not None or args.min_delay is not None or args.max_delay is not None:
-            logger.warning("Delay arguments are ignored in invisible mode.")
-        delay = 0.0  # No delay needed in invisible mode
-    
-    # Check the OS
-    if get_system() == 'Windows':
-        logger.debug("Running in Windows.")
-        print_in_windows(args.visible, args.files, args.min_delay, args.max_delay, args.delay, args.output)
-    else:
-        logger.debug("Running in Linux.")
-        print_in_linux(args.visible, args.files, delay, args.output)
+                    if args.min_delay < 0 or args.max_delay < 0:
+                        logger.error("Min and max delay must be positive numbers.")
+                        exit(1)
+                    elif args.min_delay == args.max_delay:
+                        args.delay = args.min_delay
+                        args.min_delay = None
+                        args.max_delay = None
+                        logger.info(f"Min-delay and max-delay are the same, using delay={args.delay} seconds.")
+                        delay = args.delay
+                    elif args.min_delay > args.max_delay:
+                        logger.error("Min delay must be less than or equal to max delay.")
+                        exit(1)
+                    else:
+                        delay = (args.min_delay, args.max_delay)
+            logger.debug(f"Using delay: {delay} seconds.")
+        else:
+            # Invisible mode
+            if args.delay is not None or args.min_delay is not None or args.max_delay is not None:
+                logger.warning("Delay arguments are ignored in invisible mode.")
+            delay = 0.0  # No delay needed in invisible mode
+        
+        # Check the OS
+        if get_system() == 'Windows':
+            logger.debug("Running in Windows.")
+            print_in_windows(args.visible, args.files, args.min_delay, args.max_delay, args.delay, args.output)
+        else:
+            logger.debug("Running in Linux.")
+            print_in_linux(args.visible, args.files, delay, args.output)
 
-    logger.info("Finishing printer-simulation.")
+    except KeyboardInterrupt:
+        logger.warning("printer-simulation interrupted by user. Closing any open processes...")
+        if FILE_PROGRAM_PROC:
+            close_failsafe(FILE_PROGRAM_PROC)
+        if PRINT_PROGRAM_PROC:
+            close_failsafe(PRINT_PROGRAM_PROC)
+            
+        enable_user_input()
+    finally:
+        logger.info("Finishing printer-simulation.")
 
 
 if __name__ == '__main__':
